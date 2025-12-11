@@ -6,8 +6,8 @@ Hyperparameters for the CNN model training.
 learning_rate = 0.001
 
 # Batch size for training
-# Note: Reduce to 16 or 8 if running into memory issues in Colab or limited GPU VRAM
-batch_size = 32
+# Reduced to 16 for Colab memory constraints (can lower to 8 if still having issues)
+batch_size = 16
 
 # Number of epochs to train
 num_epochs = 20

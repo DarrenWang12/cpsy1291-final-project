@@ -40,13 +40,9 @@ def load_dataset(data_dir, subset='training', validation_split=0.2):
     # Normalize pixel values to [0, 1]
     dataset = dataset.map(lambda x, y: (tf.cast(x, tf.float32) / 255.0, y))
     # Optimize dataset performance
-    # For large training datasets, don't cache in RAM to avoid memory issues
-    # Cache only for smaller validation/test sets to speed them up
-    if subset == 'training':
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    else:
-        # Validation and test sets are smaller, so caching is safe and beneficial
-        dataset = dataset.cache().prefetch(tf.data.AUTOTUNE)
+    # Don't cache full dataset in RAM; just prefetch a small fixed amount
+    # Using a fixed prefetch size (instead of AUTOTUNE) to avoid excessive memory usage in Colab
+    dataset = dataset.prefetch(2)
     return dataset
 
 
