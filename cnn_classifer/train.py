@@ -190,15 +190,6 @@ def train_model(resume=True, initial_epoch=None):
             save_freq='epoch',
             verbose=1
         ),
-        # Save periodic backup every 5 epochs (regardless of accuracy)
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(hp.checkpoint_dir, 'backup_epoch_{epoch:02d}_val_acc_{val_accuracy:.4f}.h5'),
-            monitor='val_accuracy',
-            save_best_only=False,
-            save_weights_only=False,
-            save_freq=5 * steps_per_epoch,  # Save every 5 epochs
-            verbose=0  # Don't print for backups
-        ),
         # Early stopping
         tf.keras.callbacks.EarlyStopping(
             monitor='val_accuracy',
