@@ -40,7 +40,13 @@ def load_dataset(data_dir, subset='training', validation_split=0.2):
     # Normalize pixel values to [0, 1]
     dataset = dataset.map(lambda x, y: (tf.cast(x, tf.float32) / 255.0, y))
     # Optimize dataset performance
-    dataset = dataset.cache().prefetch(tf.data.AUTOTUNE)
+    # For large training datasets, don't cache in RAM to avoid memory issues
+    # Cache only for smaller validation/test sets to speed them up
+    if subset == 'training':
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    else:
+        # Validation and test sets are smaller, so caching is safe and beneficial
+        dataset = dataset.cache().prefetch(tf.data.AUTOTUNE)
     return dataset
 
 

@@ -4,15 +4,99 @@ Training script for the CNN classifier.
 
 import tensorflow as tf
 import os
+import re
+import glob
+import csv
 from pathlib import Path
 import hyperparameters as hp
 from model import VGGModel
 from data_loader import load_dataset, get_data_augmentation
 
 
-def train_model():
+def find_best_checkpoint(checkpoint_dir):
+    """
+    Find the checkpoint with the highest validation accuracy.
+    
+    Returns:
+        Tuple of (checkpoint_path, epoch, val_accuracy) or (None, 0, 0.0) if no checkpoint found
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return None, 0, 0.0
+    
+    best_checkpoint = None
+    best_acc = 0.0
+    best_epoch = 0
+    
+    # Check periodic checkpoints (format: checkpoint_epoch_XX_val_acc_X.XXXX.h5)
+    pattern = checkpoint_dir / 'checkpoint_epoch_*_val_acc_*.h5'
+    for checkpoint_path in glob.glob(str(pattern)):
+        # Extract epoch and accuracy from filename
+        match = re.search(r'epoch_(\d+)_val_acc_([\d.]+)', checkpoint_path)
+        if match:
+            epoch = int(match.group(1))
+            acc = float(match.group(2))
+            if acc > best_acc:
+                best_acc = acc
+                best_epoch = epoch
+                best_checkpoint = checkpoint_path
+    
+    # Also check the best_model.weights.h5 - we'll need to get accuracy from CSV log
+    best_weights_path = checkpoint_dir / 'best_model.weights.h5'
+    if best_weights_path.exists():
+        # Try to get accuracy from CSV log
+        csv_path = checkpoint_dir / 'training_log.csv'
+        if csv_path.exists():
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+                    if rows:
+                        # Find row with highest val_accuracy
+                        best_row = max(rows, key=lambda x: float(x.get('val_accuracy', 0)))
+                        csv_acc = float(best_row.get('val_accuracy', 0))
+                        csv_epoch = int(best_row.get('epoch', 0)) + 1  # epoch is 0-indexed in CSV
+                        
+                        if csv_acc > best_acc:
+                            best_acc = csv_acc
+                            best_epoch = csv_epoch
+                            best_checkpoint = str(best_weights_path)
+            except (IOError, ValueError, KeyError) as e:
+                print(f"Warning: Could not read training log: {e}")
+    
+    return best_checkpoint, best_epoch, best_acc
+
+
+def get_starting_epoch(checkpoint_dir):
+    """
+    Determine the starting epoch from the training log CSV.
+    
+    Returns:
+        Starting epoch number (0 if no previous training found)
+    """
+    csv_path = Path(checkpoint_dir) / 'training_log.csv'
+    if csv_path.exists():
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                if rows:
+                    # Get the last epoch number and add 1
+                    last_epoch = int(rows[-1].get('epoch', 0))
+                    return last_epoch + 1
+        except (IOError, ValueError, KeyError) as e:
+            print(f"Warning: Could not determine starting epoch from CSV: {e}")
+    
+    return 0
+
+
+def train_model(resume=True, initial_epoch=None):
     """
     Train the VGGModel on the dataset.
+    
+    Args:
+        resume: If True, attempt to resume from the best checkpoint
+        initial_epoch: Starting epoch (if None, will be determined from checkpoint/CSV)
     """
     print("Loading datasets...")
     
@@ -40,6 +124,41 @@ def train_model():
         metrics=['accuracy', 'binary_accuracy']
     )
     
+    # Check for existing checkpoints and resume if requested
+    start_epoch = 0
+    if resume:
+        best_checkpoint, best_epoch, best_acc = find_best_checkpoint(hp.checkpoint_dir)
+        
+        if best_checkpoint and os.path.exists(best_checkpoint):
+            print(f"\n{'='*70}")
+            print("RESUMING FROM CHECKPOINT")
+            print(f"{'='*70}")
+            print(f"Best checkpoint found: {best_checkpoint}")
+            print(f"Epoch: {best_epoch}, Validation Accuracy: {best_acc:.4f}")
+            print(f"{'='*70}\n")
+            
+            # Load the checkpoint
+            if best_checkpoint.endswith('.weights.h5'):
+                # Load weights only
+                trainable_model.load_weights(best_checkpoint)
+                print(f"Loaded weights from {best_checkpoint}")
+            else:
+                # Load full model
+                trainable_model = tf.keras.models.load_model(best_checkpoint)
+                print(f"Loaded full model from {best_checkpoint}")
+            
+            # Determine starting epoch
+            if initial_epoch is None:
+                start_epoch = get_starting_epoch(hp.checkpoint_dir)
+                if start_epoch == 0:
+                    start_epoch = best_epoch
+            else:
+                start_epoch = initial_epoch
+            
+            print(f"Resuming training from epoch {start_epoch}\n")
+        else:
+            print("No checkpoint found. Starting training from scratch.\n")
+    
     # Create directories for saving
     os.makedirs(hp.model_save_path, exist_ok=True)
     os.makedirs(hp.checkpoint_dir, exist_ok=True)
@@ -52,7 +171,7 @@ def train_model():
     
     # Callbacks
     callbacks = [
-        # Save best model based on validation accuracy
+        # Save best model based on validation accuracy (saves every epoch when accuracy improves)
         tf.keras.callbacks.ModelCheckpoint(
             filepath=os.path.join(hp.checkpoint_dir, 'best_model.weights.h5'),
             monitor='val_accuracy',
@@ -62,14 +181,23 @@ def train_model():
             verbose=1,
             save_freq='epoch'
         ),
-        # Save checkpoint every 5 epochs (as full model for backup)
+        # Save epoch-specific checkpoint every epoch when validation accuracy improves
         tf.keras.callbacks.ModelCheckpoint(
             filepath=os.path.join(hp.checkpoint_dir, 'checkpoint_epoch_{epoch:02d}_val_acc_{val_accuracy:.4f}.h5'),
+            monitor='val_accuracy',
+            save_best_only=True,  # Only save when accuracy improves
+            save_weights_only=False,
+            save_freq='epoch',
+            verbose=1
+        ),
+        # Save periodic backup every 5 epochs (regardless of accuracy)
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=os.path.join(hp.checkpoint_dir, 'backup_epoch_{epoch:02d}_val_acc_{val_accuracy:.4f}.h5'),
             monitor='val_accuracy',
             save_best_only=False,
             save_weights_only=False,
             save_freq=5 * steps_per_epoch,  # Save every 5 epochs
-            verbose=1
+            verbose=0  # Don't print for backups
         ),
         # Early stopping
         tf.keras.callbacks.EarlyStopping(
@@ -86,10 +214,10 @@ def train_model():
             min_lr=1e-7,
             verbose=1
         ),
-        # CSV logger for easy analysis
+        # CSV logger for easy analysis (append=True to preserve history when resuming)
         tf.keras.callbacks.CSVLogger(
             filename=os.path.join(hp.checkpoint_dir, 'training_log.csv'),
-            append=False,
+            append=resume and start_epoch > 0,  # Append if resuming, otherwise overwrite
             separator=','
         ),
         # TensorBoard
@@ -113,15 +241,24 @@ def train_model():
     print(f"Steps per epoch:      {steps_per_epoch:,}")
     print(f"Validation steps:     {validation_steps:,}")
     print(f"Epochs:               {hp.num_epochs}")
+    print(f"Starting epoch:       {start_epoch}")
     print(f"Learning rate:        {hp.learning_rate}")
     print(f"Image size:           {hp.img_height}x{hp.img_width}")
     print(f"Checkpoint directory: {hp.checkpoint_dir}")
     print(f"Model save path:      {hp.model_save_path}")
     print("="*70)
     print("\nStarting training...\n")
+    
+    # Adjust total epochs if resuming
+    total_epochs = hp.num_epochs
+    if start_epoch >= total_epochs:
+        print(f"Warning: Starting epoch {start_epoch} is >= total epochs {total_epochs}.")
+        print(f"Training will complete immediately. Adjust num_epochs in hyperparameters.py if needed.\n")
+    
     history = trainable_model.fit(
         train_dataset,
-        epochs=hp.num_epochs,
+        epochs=total_epochs,
+        initial_epoch=start_epoch,
         validation_data=val_dataset,
         callbacks=callbacks,
         verbose=1
